@@ -24,7 +24,7 @@ fn get_expected_weekdays(start_date: &NaiveDate, end_date: &NaiveDate) -> f64 {
             Weekday::Sat | Weekday::Sun => 0,
             _ => 1
         };
-        current_date = current_date + Duration::days(1);
+        current_date += Duration::days(1);
     }
 
     total_days as f64 * hours_per_day
@@ -39,7 +39,7 @@ async fn main() -> Result<(), String> {
     let first_day_of_the_year = NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap();
 
     // Set today as end date if none is provided + adjust provided date to today if it's in the future.
-    let end_date = match args.get(2) {
+    let mut end_date = match args.get(2) {
         None => today,
         Some(s) => {
             let parsed_date = NaiveDate::from_str(s).unwrap();
@@ -67,35 +67,43 @@ async fn main() -> Result<(), String> {
     };
 
     let start_date_str = format!("{}", start_date.format("%Y-%m-%d"));
-    let end_date_str = format!("{}", end_date.format("%Y-%m-%d"));
+    let mut end_date_str = format!("{}", end_date.format("%Y-%m-%d"));
 
     let harvest_client = HarvestClient::from_env();
-    let time_entries = harvest_client
+    let actual_hours = harvest_client
         .list_time_entries()
         .from(start_date_str.as_str())
         .to(end_date_str.as_str())
-        .send();
-
-    let expected_hours = get_expected_weekdays(&start_date, &end_date);
-    let actual_hours = time_entries
+        .send()
         .await
         .expect("Invalid date. Month and day needs leading zeros")
         .time_entries
         .iter()
-        .map(|te| te.hours.unwrap())
+        .map(|te| {
+            // If hours are found on current day, push end date with one day to include today's hours.
+            if te.spent_date.as_ref().unwrap() == &end_date_str {
+                end_date += Duration::days(1);
+                end_date_str = format!("{}", end_date.format("%Y-%m-%d"));
+            }
+
+            te.hours.as_ref().unwrap()
+        })
         .sum::<f64>();
 
+    let expected_hours = get_expected_weekdays(&start_date, &end_date);
     let flex_balance = actual_hours - expected_hours;
 
-    println!("Start date: {} - End date: {}", start_date_str, end_date_str);
+    println!("Start date: {start_date_str} - End date: {end_date_str}");
     println!("Expected hours: {expected_hours}");
     println!("Actual hours: {actual_hours}");
 
-    if flex_balance >= 0.0 {
-        println!("{}", format!("{flex_balance} hour(s) above expected").green());
-    } else {
-        println!("{}", format!("{flex_balance} hour(s) below expected").red())
-    };
+    // Format the output with colors based on available flex.
+    let positive_flex_balance = flex_balance >= 0.0;
+    let output_str = format!("{flex_balance} hour(s) {} expected",
+                             if positive_flex_balance { "above" } else { "below" });
+    println!("{}",
+             if positive_flex_balance { output_str.green() } else { output_str.red() }
+    );
 
     Ok(())
 }
